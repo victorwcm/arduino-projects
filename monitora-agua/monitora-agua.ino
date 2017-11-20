@@ -2,19 +2,27 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 
+#define CAYENNE_PRINT Serial
+#include <CayenneMQTTESP8266.h>
+
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
 
 #define MAX_ATTEMPTS 10
+#define CFG_BTN 0
 
 // mqtt parameters
-char param_mqtt_server[40] = "things.ubidots.com";
+char param_mqtt_server[40] = "mqtt.mydevices.com";
 char param_mqtt_port[6] = "1883";
-char param_mqtt_username[100] = "A1E-w6pTbDKLKGbUdfpeEeZaiXhRmS4a6e";
-char param_mqtt_password[2] = "";
-const char* configTopic = "config";
+// char param_mqtt_username[100] = "A1E-w6pTbDKLKGbUdfpeEeZaiXhRmS4a6e";
+char param_mqtt_username[100] = "20a41dc0-959d-11e7-a491-d751ec027e48";
+char param_mqtt_password[100] = "533ad2b2df7fa505ecd01b2792e184702a0c96f0";
+char param_mqtt_clientid[100] = "456f6080-cd59-11e7-98e1-8369df76aa6d";
+const char* configTopic = "vwcm/config";
+const char* SSIDAP = "JuaPumpSystem";
+const char* APPass = "JuaPumpSystem";
 
 // application configurable parameters
 char param_sample_interval[3] = "5";  // time interval in seconds between samples
@@ -34,6 +42,8 @@ long lastMsg = 0;
 char msg[50];
 int value = 0;
 
+unsigned long lastMillis = 0;
+
 // wifi manager configurations
 bool shouldSaveConfig = false;
 //callback notifying us of the need to save config
@@ -44,7 +54,7 @@ void saveConfigCallback () {
 
 void readFS() {
   //clean FS, for testing
-  //SPIFFS.format();
+  // SPIFFS.format();
 
   // read configuration from FS json
   Serial.println("mounting FS...");
@@ -97,7 +107,8 @@ void configWM() {
   WiFiManagerParameter custom_mqtt_server("server", "mqtt server", param_mqtt_server, 40);
   WiFiManagerParameter custom_mqtt_port("port", "mqtt port", param_mqtt_port, 6);
   WiFiManagerParameter custom_mqtt_username("username", "mqtt username", param_mqtt_username, 100);
-  WiFiManagerParameter custom_mqtt_password("password", "mqtt password", param_mqtt_password, 2);
+  WiFiManagerParameter custom_mqtt_password("password", "mqtt password", param_mqtt_password, 100);
+  WiFiManagerParameter custom_mqtt_clientid("clientid", "client id", param_mqtt_clientid, 100);
   WiFiManagerParameter custom_sample_interval("interval", "sample interval", param_sample_interval, 3);
   WiFiManagerParameter custom_lowerest_level("llevel", "lowerest level", param_lowerest_level, 4);
   WiFiManagerParameter custom_highest_level("hlevel", "highest level", param_highest_level, 4);
@@ -106,16 +117,17 @@ void configWM() {
   wifiManager.addParameter(&custom_mqtt_port);
   wifiManager.addParameter(&custom_mqtt_username);
   wifiManager.addParameter(&custom_mqtt_password);
+  wifiManager.addParameter(&custom_mqtt_clientid);
   wifiManager.addParameter(&custom_sample_interval);
   wifiManager.addParameter(&custom_lowerest_level);
   wifiManager.addParameter(&custom_highest_level);
   // reset settings - for testing
-  // wifiManager.resetSettings();
+  wifiManager.resetSettings();
   
   // fetches ssid and pass and tries to connect
   // if it does not connect it starts an access point with the specified name
   // and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect("JuaLabsPumpSystem", "jualabs")) {
+  if (!wifiManager.autoConnect(SSIDAP, APPass)) {
     Serial.println("failed to connect and hit timeout");
     delay(3000);
     //reset and try again, or maybe put it to deep sleep
@@ -129,6 +141,7 @@ void configWM() {
   strcpy(param_mqtt_port, custom_mqtt_port.getValue());
   strcpy(param_mqtt_username, custom_mqtt_username.getValue());
   strcpy(param_mqtt_password, custom_mqtt_password.getValue());
+  strcpy(param_mqtt_clientid, custom_mqtt_clientid.getValue());
   strcpy(param_sample_interval, custom_sample_interval.getValue());
   strcpy(param_lowerest_level, custom_lowerest_level.getValue());
   strcpy(param_highest_level, custom_highest_level.getValue());
@@ -146,6 +159,7 @@ void configWM() {
     json["mqtt_port"] = param_mqtt_port;
     json["mqtt_username"] = param_mqtt_username;
     json["mqtt_password"] = param_mqtt_password;
+    json["mqtt_clientid"] = param_mqtt_clientid;
     json["sample_interval"] = param_sample_interval;
     json["lowerest_level"] = param_lowerest_level;
     json["highest_level"] = param_highest_level;
@@ -163,6 +177,27 @@ void configWM() {
   }
 }
 
+void startConfigPortal() {
+    // WiFiManager declaration
+    WiFiManager wifiManager;
+    
+    if (!wifiManager.startConfigPortal(SSIDAP, APPass)) {
+      Serial.println("failed to connect and hit timeout");
+      delay(3000);
+      //reset and try again, or maybe put it to deep sleep
+      ESP.reset();
+      delay(5000);
+    }
+    //if you get here you have connected to the WiFi
+    Serial.println("connected...yeey :)");
+}
+
+void checkConfigBtnPress() {
+  if ( digitalRead(CFG_BTN) == LOW ) {
+    startConfigPortal();
+  }
+}
+
 void setup() {
   // pins configuration
   pinMode(BUILTIN_LED, OUTPUT);     // initialize the BUILTIN_LED pin as an output
@@ -176,38 +211,16 @@ void setup() {
   Serial.println("local ip");
   Serial.println(WiFi.localIP());
   
-  client.setServer(param_mqtt_server, atoi(param_mqtt_port));
-  client.setCallback(callback);
+  Cayenne.begin(param_mqtt_username, param_mqtt_password, param_mqtt_clientid);
+  // client.setServer(param_mqtt_server, atoi(param_mqtt_port));
+  // client.setCallback(callback);
 }
 
 /*
-void setup_wifi() {
-
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(currentSSID);
-
-  WiFi.begin(currentSSID, currentPassword);
-
-  // todo: inserir entrada no modo AP caso nao consiga reconectar
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-*/
-
 void callback(char* topic, byte* payload, unsigned int length) {
   // verify topic
   if(strcmp(topic,configTopic) == 0) { // it is a config message
-    
+    startConfigPortal();  
   }
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -228,17 +241,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 }
 
+
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("ESP8266Client")) {
+    if (client.connect(param_mqtt_clientid, param_mqtt_username, param_mqtt_password)) {
       Serial.println("connected");
       // Once connected, publish an announcement...
       client.publish("outTopic", "hello world");
       // ... and resubscribe
-      client.subscribe("inTopic");
+      client.subscribe(configTopic);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -248,8 +262,10 @@ void reconnect() {
     }
   }
 }
-void loop() {
+*/
 
+void loop() {
+/*
   if (!client.connected()) {
     reconnect();
   }
@@ -263,6 +279,18 @@ void loop() {
     Serial.print("Publish message: ");
     Serial.println(msg);
     client.publish("vwcm/test", msg);
+  }*/
+  Cayenne.loop();
+
+  //Publish data every 10 seconds (10000 milliseconds). Change this value to publish at a different interval.
+  if (millis() - lastMillis > (sampleInterval*1000)) {
+    lastMillis = millis();
+    //Write data to Cayenne here. This example just sends the current uptime in milliseconds.
+    Cayenne.virtualWrite(0, readLevel());
+    //Some examples of other functions you can use to send data.
+    //Cayenne.celsiusWrite(1, 22.0);
+    //Cayenne.luxWrite(2, 700);
+    //Cayenne.virtualWrite(3, 50, TYPE_PROXIMITY, UNIT_CENTIMETER);
   }
 }
 
