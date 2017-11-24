@@ -1,6 +1,5 @@
 #include <FS.h>
 #include <ESP8266WiFi.h>
-#include <PubSubClient.h>
 
 #define CAYENNE_PRINT Serial
 #include <CayenneMQTTESP8266.h>
@@ -12,6 +11,10 @@
 
 #define MAX_ATTEMPTS 10
 #define CFG_BTN 0
+#define CFG_CHN 2
+#define LL_CHN 3
+#define HL_CHN 4
+#define SI_CHN 5
 
 // mqtt parameters
 char param_mqtt_server[40] = "mqtt.mydevices.com";
@@ -36,8 +39,6 @@ int32_t highestLevel = 10;  // reservatory highest level in cm
 const uint8_t triggerPin = D4;  //D4
 const uint8_t echoPin = D3;  //D3
 
-WiFiClient espClient;
-PubSubClient client(espClient);
 long lastMsg = 0;
 char msg[50];
 int value = 0;
@@ -122,7 +123,7 @@ void configWM() {
   wifiManager.addParameter(&custom_lowerest_level);
   wifiManager.addParameter(&custom_highest_level);
   // reset settings - for testing
-  wifiManager.resetSettings();
+  // wifiManager.resetSettings();
   
   // fetches ssid and pass and tries to connect
   // if it does not connect it starts an access point with the specified name
@@ -212,90 +213,26 @@ void setup() {
   Serial.println(WiFi.localIP());
   
   Cayenne.begin(param_mqtt_username, param_mqtt_password, param_mqtt_clientid);
-  // client.setServer(param_mqtt_server, atoi(param_mqtt_port));
-  // client.setCallback(callback);
-}
-
-/*
-void callback(char* topic, byte* payload, unsigned int length) {
-  // verify topic
-  if(strcmp(topic,configTopic) == 0) { // it is a config message
-    startConfigPortal();  
-  }
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is acive low on the ESP-01)
-  } else {
-    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
 
 }
-
-
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect
-    if (client.connect(param_mqtt_clientid, param_mqtt_username, param_mqtt_password)) {
-      Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish("outTopic", "hello world");
-      // ... and resubscribe
-      client.subscribe(configTopic);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
-*/
 
 void loop() {
-/*
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
-
-  uint64_t now = millis();
-  if (now - lastMsg > (sampleInterval*1000)) {
-    lastMsg = now;
-    ++value;
-    snprintf (msg, 75, "{\"level\":\"%d\",\"pump\":\"%d\"}", readLevel(), readPump());
-    Serial.print("Publish message: ");
-    Serial.println(msg);
-    client.publish("vwcm/test", msg);
-  }*/
   Cayenne.loop();
 
-  //Publish data every 10 seconds (10000 milliseconds). Change this value to publish at a different interval.
+  // publish data every sampleInterval seconds
   if (millis() - lastMillis > (sampleInterval*1000)) {
     lastMillis = millis();
-    //Write data to Cayenne here. This example just sends the current uptime in milliseconds.
-    Cayenne.virtualWrite(0, readLevel());
-    //Some examples of other functions you can use to send data.
-    //Cayenne.celsiusWrite(1, 22.0);
-    //Cayenne.luxWrite(2, 700);
-    //Cayenne.virtualWrite(3, 50, TYPE_PROXIMITY, UNIT_CENTIMETER);
+    // write the tank level data to Cayenne
+    Cayenne.virtualWrite(0, readLevel(), "tl", "null");
+    // write the pump state to Cayenne
+    Cayenne.virtualWrite(1, readPump(), "digital_sensor", "d");
   }
 }
 
 int32_t readLevel() {
-  return (int32_t) (((readDistance() - lowerestLevel) * 100) / (highestLevel - lowerestLevel));  
+  int32_t returnValue = (int32_t) (((readDistance() - lowerestLevel) * 100) / (highestLevel - lowerestLevel));
+  CAYENNE_LOG("NIVEL: %d - %d - %d", returnValue, lowerestLevel, highestLevel);
+  return returnValue;  
 }
 
 int32_t readDistance() {
@@ -316,8 +253,8 @@ int32_t readDistance() {
   // calculating the distance
   distance = (int32_t) (duration*0.034)/2;
   // DEBUG
-  //Serial.print("Distance: ");
-  //Serial.println(distance);
+  Serial.print("Distance: ");
+  Serial.println(distance);
   // DEBUG end
   return distance;
 }
@@ -326,3 +263,25 @@ uint8_t readPump() {
   return 0;
 }
 
+// Default function for processing actuator commands from the Cayenne Dashboard.
+// You can also use functions for specific channels, e.g CAYENNE_IN(1) for channel 1 commands.
+
+CAYENNE_IN_DEFAULT() {
+  CAYENNE_LOG("CAYENNE_IN_DEFAULT(%u) - %s, %s", request.channel, getValue.getId(), getValue.asString());
+  switch(request.channel) {
+    case CFG_CHN:
+      startConfigPortal();
+      break;
+    case LL_CHN:
+      lowerestLevel = atoi(getValue.asString());
+      break;
+    case HL_CHN:
+      highestLevel = atoi(getValue.asString());
+      break;
+    case SI_CHN:
+      sampleInterval = atoi(getValue.asString());
+      break;
+    default:
+      break;
+  }
+}
